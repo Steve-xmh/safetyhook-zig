@@ -1,5 +1,8 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const common = @import("common.zig");
+
+const MemPtr = common.MemPtr;
 
 const platform = switch (builtin.os.tag) {
     .windows => @import("os.windows.zig"),
@@ -10,7 +13,6 @@ pub const vm_allocate = platform.vm_allocate;
 pub const vm_free = platform.vm_free;
 pub const vm_protect = platform.vm_protect;
 
-pub const MemPtr = [*]u8;
 pub const VmAccess = packed struct {
     read: bool = false,
     write: bool = false,
@@ -29,6 +31,20 @@ pub const VmAccess = packed struct {
     pub inline fn is_same(a: VmAccess, b: VmAccess) bool {
         return a.read == b.read and a.write == b.write and a.execute == b.execute;
     }
+};
+
+pub const VmBasicInfo = struct {
+    address: MemPtr,
+    size: usize,
+    access: VmAccess,
+    is_free: bool,
+};
+
+pub const SystemInfo = struct {
+    page_size: usize,
+    allocation_granularity: usize,
+    min_address: MemPtr,
+    max_address: MemPtr,
 };
 
 pub const VMError = error{
