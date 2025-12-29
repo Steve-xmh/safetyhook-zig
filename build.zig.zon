@@ -1,0 +1,12 @@
+.{
+    .name = .TaikoArcadeLoader_Zig,
+    .version = "0.15.2",
+    .dependencies = .{
+        .zydis = .{
+            .url = "https://github.com/zyantific/zydis/releases/download/v4.1.0/zydis-amalgamated.tar.gz",
+            .hash = "N-V-__8AANgevAAQNhKc9x4DHcrcBSzalFjaHTIvGGcjwpmY",
+        },
+    },
+    .paths = .{""},
+    .fingerprint = 0x918e9949d8d4cdd6,
+}
