@@ -30,7 +30,7 @@ const Project = struct {
     optimize: std.builtin.OptimizeMode,
 
     zydis: *std.Build.Step.Compile,
-    safetyhook: *std.Build.Step.Compile,
+    safetyhook: *std.Build.Module,
 
     fn create(b: *std.Build) Project {
         const target = b.resolveTargetQuery(.{
@@ -63,17 +63,13 @@ const Project = struct {
 
         // Build safetyhook
 
-        const safetyhook = b.addLibrary(.{
-            .name = "safetyhook",
-            .root_module = b.createModule(.{
-                .target = target,
-                .optimize = optimize,
-                .root_source_file = b.path("src/lib.zig"),
-            }),
+        const safetyhook = b.addModule("safetyhook", .{
+            .target = target,
+            .optimize = optimize,
+            .root_source_file = b.path("src/lib.zig"),
         });
 
-        safetyhook.root_module.addImport("zydis", zydis_lib.root_module);
-        b.installArtifact(safetyhook);
+        safetyhook.addImport("zydis", zydis_lib.root_module);
 
         const proj = Project{
             .b = b,
@@ -96,7 +92,7 @@ const Project = struct {
             }),
         });
 
-        example.root_module.addImport("safetyhook", self.safetyhook.root_module);
+        example.root_module.addImport("safetyhook", self.safetyhook);
         self.b.installArtifact(example);
     }
 };
