@@ -104,5 +104,6 @@ const Project = struct {
 pub fn build(b: *std.Build) !void {
     const proj = Project.create(b);
 
+    proj.add_example("inline-hook");
     proj.add_example("mid-hook");
 }

@@ -1,3 +1,4 @@
+const common = @import("common.zig");
 const common_os = @import("os.zig");
 const VmAccess = common_os.VmAccess;
 const VMError = common_os.VMError;
@@ -79,14 +80,15 @@ pub fn vm_protect(ptr: MemPtr, size: usize, access: VmAccess) !VmAccess {
 }
 
 fn system_info() common_os.SystemInfo {
-    var info: common_os.SystemInfo = .{};
-    var si: win.SYSTEM_INFO = .{};
+    var si = std.mem.zeroes(win.SYSTEM_INFO);
     win.kernel32.GetSystemInfo(&si);
 
-    info.page_size = si.dwPageSize;
-    info.allocation_granularity = si.dwAllocationGranularity;
-    info.min_address = @ptrCast(si.lpMinimumApplicationAddress);
-    info.max_address = @ptrCast(si.lpMaximumApplicationAddress);
+    const info: common_os.SystemInfo = .{
+        .page_size = si.dwPageSize,
+        .allocation_granularity = si.dwAllocationGranularity,
+        .min_address = @ptrCast(si.lpMinimumApplicationAddress),
+        .max_address = @ptrCast(si.lpMaximumApplicationAddress),
+    };
 
     return info;
 }
@@ -109,13 +111,28 @@ const TrapManager = struct {
     mutex: std.Thread.Mutex,
     m_traps: TrapMap,
 
+    var global_trap_manager: ?TrapManager = null;
+
+    pub fn global() *TrapManager {
+        if (global_trap_manager) |mgr| {
+            return @constCast(&mgr);
+        } else {
+            global_trap_manager = TrapManager.create(common.allocator.allocator());
+            if (global_trap_manager) |mgr| {
+                return @constCast(&mgr);
+            } else {
+                @panic("Failed to create global TrapManager");
+            }
+        }
+    }
+
     pub fn create(allocator: std.mem.Allocator) TrapManager {
         return TrapManager{
             .allocator = allocator,
             .m_trap_veh = win.kernel32.AddVectoredExceptionHandler(
                 1,
                 trap_handler,
-            ),
+            ).?,
             .mutex = std.Thread.Mutex{},
             .m_traps = TrapMap.init(allocator),
         };
@@ -138,7 +155,7 @@ const TrapManager = struct {
     pub fn find_trap(self: *TrapManager, addr: MemPtr) ?*TrapInfo {
         var it = self.m_traps.valueIterator();
         while (it.next()) |trap| {
-            if (addr >= trap.from and addr < trap.from + trap.len) {
+            if (@intFromPtr(addr) >= @intFromPtr(trap.from) and @intFromPtr(addr) < @intFromPtr(trap.from) + trap.len) {
                 return trap;
             }
         }
@@ -149,13 +166,13 @@ const TrapManager = struct {
         var it = self.m_traps.valueIterator();
 
         while (it.next()) |trap| {
-            if (addr >= trap.from_page_start and addr < trap.from_page_end) {
+            if (@intFromPtr(addr) >= @intFromPtr(trap.from_page_start) and @intFromPtr(addr) < @intFromPtr(trap.from_page_end)) {
                 return trap;
             }
         }
 
         while (it.next()) |trap| {
-            if (addr >= trap.to_page_start and addr < trap.to_page_end) {
+            if (@intFromPtr(addr) >= @intFromPtr(trap.to_page_start) and @intFromPtr(addr) < @intFromPtr(trap.to_page_end)) {
                 return trap;
             }
         }
@@ -171,22 +188,27 @@ const TrapManager = struct {
         self.m_traps.deinit();
     }
 
-    fn trap_handler(exp: *win.EXCEPTION_POINTERS) win.LONG {
+    fn trap_handler(exp: *win.EXCEPTION_POINTERS) callconv(.c) win.LONG {
         const exception_code = exp.ExceptionRecord.ExceptionCode;
 
         if (exception_code != win.EXCEPTION_ACCESS_VIOLATION) {
             return win.EXCEPTION_CONTINUE_SEARCH;
         }
 
+        var trap_manager = TrapManager.global();
+        std.debug.print("locking at trap manager\n", .{});
         trap_manager.mutex.lock();
-        defer trap_manager.mutex.unlock();
+        defer {
+            std.debug.print("unlocking at trap manager\n", .{});
+            trap_manager.mutex.unlock();
+        }
 
-        const faulting_address: MemPtr = @ptrCast(exp.ExceptionRecord.ExceptionInformation[1]);
+        const faulting_address: MemPtr = @ptrFromInt(exp.ExceptionRecord.ExceptionInformation[1]);
         const opt_trap = trap_manager.find_trap(faulting_address);
 
         if (opt_trap) |trap| {
             for (0..trap.len) |i| {
-                fix_ip(&exp.ContextRecord, trap.from + i, trap.to + i);
+                fix_ip(exp.ContextRecord, trap.from + i, trap.to + i);
             }
 
             return -1; // EXCEPTION_CONTINUE_EXECUTION
@@ -200,21 +222,20 @@ const TrapManager = struct {
     }
 };
 
-var trap_manager = TrapManager.create(std.heap.page_allocator);
 var virtual_protect_mutex = std.Thread.Mutex{};
 
 fn find_me() void {}
 
-pub fn trap_threads(from: MemPtr, to: MemPtr, size: usize, run_func: *const fn () void) void {
-    var find_me_mbi: win.MEMORY_BASIC_INFORMATION = .{};
-    var from_mbi: win.MEMORY_BASIC_INFORMATION = .{};
-    var to_mbi: win.MEMORY_BASIC_INFORMATION = .{};
+pub fn trap_threads(from: MemPtr, to: MemPtr, size: usize, run_func: *const fn () void) !void {
+    var find_me_mbi = std.mem.zeroes(win.MEMORY_BASIC_INFORMATION);
+    var from_mbi = std.mem.zeroes(win.MEMORY_BASIC_INFORMATION);
+    var to_mbi = std.mem.zeroes(win.MEMORY_BASIC_INFORMATION);
 
-    win.VirtualQuery(@ptrCast(find_me), &find_me_mbi, @sizeOf(win.MEMORY_BASIC_INFORMATION));
-    win.VirtualQuery(@ptrCast(from), &from_mbi, @sizeOf(win.MEMORY_BASIC_INFORMATION));
-    win.VirtualQuery(@ptrCast(to), &to_mbi, @sizeOf(win.MEMORY_BASIC_INFORMATION));
+    _ = try win.VirtualQuery(@ptrCast(@constCast(&find_me)), &find_me_mbi, @sizeOf(win.MEMORY_BASIC_INFORMATION));
+    _ = try win.VirtualQuery(@ptrCast(from), &from_mbi, @sizeOf(win.MEMORY_BASIC_INFORMATION));
+    _ = try win.VirtualQuery(@ptrCast(to), &to_mbi, @sizeOf(win.MEMORY_BASIC_INFORMATION));
 
-    const new_protect = win.PAGE_READWRITE;
+    var new_protect: win.DWORD = win.PAGE_READWRITE;
 
     if (from_mbi.AllocationBase == find_me_mbi.AllocationBase or
         to_mbi.AllocationBase == find_me_mbi.AllocationBase)
@@ -223,43 +244,48 @@ pub fn trap_threads(from: MemPtr, to: MemPtr, size: usize, run_func: *const fn (
     }
 
     const si = system_info();
-    const from_page_start = utility.align_down(from, si.page_size);
-    const from_page_end = utility.align_up(from + size, si.page_size);
-    const vp_start: MemPtr = @ptrCast(&win.VirtualProtect);
+    const from_page_start = utility.align_down(@intFromPtr(from), si.page_size);
+    const from_page_end = utility.align_up(@intFromPtr(from) + size, si.page_size);
+    const vp_start: MemPtr = @ptrCast(@constCast(&win.VirtualProtect));
     const vp_end = vp_start + 0x20;
 
-    if (!(from_page_end < vp_start or vp_end < from_page_start)) {
+    if (!(from_page_end < @intFromPtr(vp_start) or @intFromPtr(vp_end) < from_page_start)) {
         new_protect = win.PAGE_EXECUTE_READWRITE;
     }
 
-    trap_manager.mutex.lock();
-    defer trap_manager.mutex.unlock();
-    trap_manager.add_trap(from, to, size) catch {
-        return;
-    };
+    // var trap_manager = TrapManager.global();
+    // std.debug.print("locking at trap_threads\n", .{});
+    // trap_manager.mutex.lock();
+    // trap_manager.add_trap(from, to, size) catch |err| {
+    //     std.debug.print("add_trap failed: {s}\n", .{@errorName(err)});
+    //     trap_manager.mutex.unlock();
+    //     return;
+    // };
+    // std.debug.print("unlocking at trap_threads\n", .{});
+    // trap_manager.mutex.unlock();
 
     var from_protect: win.DWORD = 0;
     var to_protect: win.DWORD = 0;
 
-    win.VirtualProtect(from, size, new_protect, &from_protect);
-    win.VirtualProtect(to, size, new_protect, &to_protect);
+    _ = try win.VirtualProtect(from, size, new_protect, &from_protect);
+    _ = try win.VirtualProtect(to, size, new_protect, &to_protect);
 
     run_func();
 
-    win.VirtualProtect(from, size, from_protect, &from_protect);
-    win.VirtualProtect(to, size, to_protect, &to_protect);
+    _ = try win.VirtualProtect(from, size, from_protect, &from_protect);
+    _ = try win.VirtualProtect(to, size, to_protect, &to_protect);
 }
 
 fn fix_ip(thread_ctx: *win.CONTEXT, old_ip: MemPtr, new_ip: MemPtr) void {
     switch (builtin.cpu.arch) {
         .x86_64 => {
             if (thread_ctx.Rip == @intFromPtr(old_ip)) {
-                thread_ctx.Rip = @ptrFromInt(new_ip);
+                thread_ctx.Rip = @intFromPtr(new_ip);
             }
         },
         .x86 => {
             if (thread_ctx.Eip == @intFromPtr(old_ip)) {
-                thread_ctx.Eip = @ptrFromInt(new_ip);
+                thread_ctx.Eip = @intFromPtr(new_ip);
             }
         },
         else => @compileError("unsupported os"),

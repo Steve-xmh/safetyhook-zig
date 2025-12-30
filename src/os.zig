@@ -2,7 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const common = @import("common.zig");
 
-const MemPtr = common.MemPtr;
+pub const MemPtr = common.MemPtr;
 
 const platform = switch (builtin.os.tag) {
     .windows => @import("os.windows.zig"),
@@ -12,6 +12,7 @@ const platform = switch (builtin.os.tag) {
 pub const vm_allocate = platform.vm_allocate;
 pub const vm_free = platform.vm_free;
 pub const vm_protect = platform.vm_protect;
+pub const trap_threads = platform.trap_threads;
 
 pub const VmAccess = packed struct {
     read: bool = false,
@@ -57,8 +58,9 @@ test "vm_allocate" {
 }
 
 test "vm_protect" {
-    const buf = try std.heap.page_allocator.alloc(u8, 4096);
-    defer std.heap.page_allocator.free(buf);
+    const allocator = common.allocator.allocator();
+    const buf = try allocator.alloc(u8, 4096);
+    defer allocator.free(buf);
 
     try std.testing.expect(VmAccess.RW != VmAccess.RWX);
 
