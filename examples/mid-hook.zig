@@ -1,17 +1,18 @@
 const safetyhook = @import("safetyhook");
 const std = @import("std");
 
-fn hook() void {
+noinline fn hook() void {
     std.debug.print("Hooked!\n", .{});
 }
 
-fn original_function(a: u32, b: u32) u32 {
+noinline fn original_function(a: u32, b: u32) callconv(.c) u32 {
     return a * b;
 }
 
-pub fn main() !void {
-    _ = try safetyhook.create_inline(original_function, hook, .{});
+pub noinline fn main() !void {
+    std.mem.doNotOptimizeAway(try safetyhook.create_inline(original_function, hook, .{}));
 
-    const result = original_function(3, 4);
+    const result = original_function(6, 7);
+
     std.debug.print("Result: {}\n", .{result});
 }

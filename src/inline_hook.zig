@@ -5,6 +5,8 @@ const common = @import("common.zig");
 const allocator_mod = @import("allocator.zig");
 const zydis = @import("zydis");
 
+const FuncPtr = common.FuncPtr;
+
 const JmpE9 = packed struct {
     opcode: u8 = 0xE9,
     relative_address: i32,
@@ -58,18 +60,68 @@ pub const InlineHookFlags = packed struct {
 };
 
 pub const InlineHook = struct {
-    pub fn create(src: common.FuncPtr, dest: common.FuncPtr, flags: InlineHookFlags) !InlineHook {
+    m_target: FuncPtr,
+    m_trampoline: FuncPtr,
+    m_trampoline_size: usize = 0,
+    m_original_bytes: std.ArrayList(u8) = std.ArrayList(u8).empty,
+
+    pub fn create(src: FuncPtr, dest: FuncPtr, flags: InlineHookFlags) !InlineHook {
         return create_with_alloc(allocator_mod.VMAllocator.global(), src, dest, flags);
     }
 
-    pub fn create_with_alloc(allocator: *allocator_mod.VMAllocator, src: common.FuncPtr, dest: common.FuncPtr, flags: InlineHookFlags) !InlineHook {
-        _ = .{
-            allocator,
-            src,
-            dest,
-            flags,
-        };
-        return .{};
+    pub fn create_with_alloc(allocator: *allocator_mod.VMAllocator, src: FuncPtr, dest: FuncPtr, flags: InlineHookFlags) !InlineHook {
+        var hook: InlineHook = .{ .m_target = src, .m_trampoline = dest };
+
+        try hook.setup(allocator);
+
+        if (!flags.start_disabled) {
+            try hook.enable();
+        }
+
+        return hook;
+    }
+
+    fn setup(self: *Self, allocator: *allocator_mod.VMAllocator) !void {
+        if (comptime builtin.cpu.arch == .x86_64) {
+            self.e9_hook(allocator) catch {
+                try self.ff_hook(allocator);
+            };
+        } else if (comptime builtin.cpu.arch == .x86) {
+            try self.e9_hook(allocator);
+        } else {
+            return error.UnsupportedArchitecture;
+        }
+    }
+
+    const Self = @This();
+
+    pub fn enable(self: *Self) !void {
+        _ = self;
+    }
+
+    pub fn disable(self: *Self) !void {
+        _ = self;
+    }
+
+    fn e9_hook(self: *Self, allocator: *allocator_mod.VMAllocator) !void {
+        var ix: zydis.ZydisDecodedInstruction = .{};
+        var ip: common.MemPtr = @ptrCast(@constCast(self.m_target));
+        const end: common.MemPtr = ip + @sizeOf(JmpE9);
+
+        while (@intFromPtr(ip) < @intFromPtr(end)) {
+            try decode(&ix, ip);
+
+            self.m_trampoline_size += ix.length;
+
+            ip += ix.length;
+        }
+
+        _ = allocator;
+    }
+
+    fn ff_hook(self: *Self, allocator: *allocator_mod.VMAllocator) !void {
+        _ = self;
+        _ = allocator;
     }
 };
 
