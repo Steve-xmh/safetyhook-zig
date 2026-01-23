@@ -8,6 +8,7 @@ fn build_zydis(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .root_source_file = zydis.path("Zydis.h"),
         .optimize = optimize,
         .target = target,
+        .link_libc = true,
     });
 
     const zydis_lib = b.addLibrary(.{
@@ -36,7 +37,7 @@ const Project = struct {
         const target = b.resolveTargetQuery(.{
             .cpu_arch = .x86_64,
             .os_tag = .windows,
-            .abi = .gnu,
+            .abi = .msvc,
         });
         const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
 
@@ -48,6 +49,7 @@ const Project = struct {
             .root_source_file = zydis.path("Zydis.h"),
             .optimize = optimize,
             .target = target,
+            .link_libc = true,
         });
 
         const zydis_lib = b.addLibrary(.{

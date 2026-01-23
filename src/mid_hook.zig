@@ -35,6 +35,7 @@ pub const Context = if (builtin.cpu.arch == .x86_64)
         rbp: u64,
         rsp: u64,
         rsp_original: u64,
+        rip: u64,
     }
 else if (builtin.cpu.arch == .x86)
     extern struct {
@@ -49,6 +50,7 @@ else if (builtin.cpu.arch == .x86)
         ebp: u32,
         esp: u32,
         esp_original: u32,
+        rip: u32,
     }
 else
     opaque {};
