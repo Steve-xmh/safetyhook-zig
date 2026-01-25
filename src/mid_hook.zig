@@ -14,9 +14,24 @@ pub const MidHookFlags = packed struct {
     start_disabled: bool = false,
 };
 
+pub const Xmm = extern union {
+    pub const Self = @This();
+
+    f32: [4]f32,
+    f64: [2]f64,
+    u8: [16]u8,
+    u16: [8]u16,
+    u32: [4]u32,
+    u64: [2]u64,
+    i8: [16]i8,
+    i16: [8]i16,
+    i32: [4]i32,
+    i64: [2]i64,
+};
+
 pub const Context = if (builtin.cpu.arch == .x86_64)
     extern struct {
-        xmm: [16][2]u64,
+        xmm: [16]Xmm,
         rflags: u64,
         r15: u64,
         r14: u64,
@@ -39,7 +54,7 @@ pub const Context = if (builtin.cpu.arch == .x86_64)
     }
 else if (builtin.cpu.arch == .x86)
     extern struct {
-        xmm: [8][2]u64,
+        xmm: [8]Xmm,
         eflags: u32,
         edi: u32,
         esi: u32,
