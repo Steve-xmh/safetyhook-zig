@@ -2,6 +2,7 @@ const common = @import("common.zig");
 const os = @import("os.zig");
 const std = @import("std");
 const utility = @import("utility.zig");
+const log = std.log.scoped(.allocator);
 
 const FreeNode = struct {
     next: ?*FreeNode,
@@ -224,23 +225,83 @@ pub const VMAllocator = struct {
                 const allocation = os.vm_allocate(ptr, alloc_size, os.VmAccess.RWX) catch return null;
                 return allocation;
             }
+
+            fn run_in_region(
+                mbi_info: os.VmBasicInfo,
+                probe: common.MemPtr,
+                prefer_high: bool,
+                desired: []const common.MemPtr,
+                alloc_size: usize,
+                max_dist: usize,
+                granularity: usize,
+            ) ?common.MemPtr {
+                const region_start_int = utility.align_up(@intFromPtr(mbi_info.address), granularity);
+                const region_end_int = @intFromPtr(mbi_info.address) + mbi_info.size;
+
+                if (region_end_int <= region_start_int) return null;
+
+                const available = region_end_int - region_start_int;
+                if (available < alloc_size) return null;
+
+                const max_base_int = region_end_int - alloc_size;
+                const probe_int = @intFromPtr(probe);
+
+                var candidate_int = if (prefer_high)
+                    utility.align_down(@min(probe_int, max_base_int), granularity)
+                else
+                    utility.align_up(@max(probe_int, region_start_int), granularity);
+
+                if (candidate_int < region_start_int) {
+                    candidate_int = region_start_int;
+                }
+
+                if (candidate_int > max_base_int) {
+                    candidate_int = utility.align_down(max_base_int, granularity);
+                }
+
+                if (candidate_int < region_start_int or candidate_int > max_base_int) return null;
+
+                const primary = run(@ptrFromInt(candidate_int), desired, alloc_size, max_dist);
+                if (primary) |addr| return addr;
+
+                const fallback_int = if (prefer_high)
+                    region_start_int
+                else
+                    utility.align_down(max_base_int, granularity);
+
+                if (fallback_int == candidate_int) return null;
+                if (fallback_int < region_start_int or fallback_int > max_base_int) return null;
+
+                return run(@ptrFromInt(fallback_int), desired, alloc_size, max_dist);
+            }
         };
 
         // Search backwards from the desired address.
         var p = desired_address;
         while (@intFromPtr(p) > @intFromPtr(search_start) and in_range(p, desired_addrs, max_distance)) : (p = align_ptr_down(mbi.address - 1, si.allocation_granularity)) {
-            mbi = vm_query(p) catch break;
+            mbi = vm_query(p) catch |err| {
+                log.err("backward vm_query failed at 0x{x}: {s}", .{ @intFromPtr(p), @errorName(err) });
+                break;
+            };
             if (!mbi.is_free) continue;
-            if (attempt_allocation.run(p, desired_addrs, size, max_distance)) |addr| return addr;
+            if (attempt_allocation.run_in_region(mbi, p, true, desired_addrs, size, max_distance, si.allocation_granularity)) |addr| return addr;
         }
 
         // Search forwards from the desired address.
         p = desired_address;
         while (@intFromPtr(p) < @intFromPtr(search_end) and in_range(p, desired_addrs, max_distance)) : (p += mbi.size) {
-            mbi = vm_query(p) catch break;
+            mbi = vm_query(p) catch |err| {
+                log.err("forward vm_query failed at 0x{x}: {s}", .{ @intFromPtr(p), @errorName(err) });
+                break;
+            };
             if (!mbi.is_free) continue;
-            if (attempt_allocation.run(p, desired_addrs, size, max_distance)) |addr| return addr;
+            if (attempt_allocation.run_in_region(mbi, p, false, desired_addrs, size, max_distance, si.allocation_granularity)) |addr| return addr;
         }
+
+        log.err(
+            "NoMemoryInRange: desired0=0x{x}, size={}, max_distance=0x{x}, search=[0x{x},0x{x}]",
+            .{ @intFromPtr(desired_address_unaligned), size, max_distance, @intFromPtr(search_start), @intFromPtr(search_end) },
+        );
 
         return error.NoMemoryInRange;
     }
@@ -304,7 +365,7 @@ fn convert_protect_to_access(protect: std.os.windows.DWORD) !os.VmAccess {
         win.PAGE_EXECUTE_READ => os.VmAccess.RX,
         win.PAGE_EXECUTE_READWRITE => os.VmAccess.RWX,
         win.PAGE_EXECUTE_WRITECOPY => os.VmAccess.RWX,
-        else => os.VMError.InvalidAccessFlags,
+        else => .{},
     };
 }
 

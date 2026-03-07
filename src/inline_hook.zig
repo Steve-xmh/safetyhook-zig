@@ -4,6 +4,7 @@ const os = @import("os.zig");
 const common = @import("common.zig");
 const allocator_mod = @import("allocator.zig");
 const zydis = @import("zydis");
+const log = std.log.scoped(.inline_hook);
 
 extern "kernel32" fn FlushInstructionCache(
     hProcess: std.os.windows.HANDLE,
@@ -28,6 +29,7 @@ const JmpE9 = extern struct {
         const offset = to_int - (from_int + 5);
 
         if (std.math.cast(i32, offset) == null) {
+            log.err("JmpE9 out of range: from=0x{x}, to=0x{x}, offset={d}", .{ @intFromPtr(from), @intFromPtr(to), offset });
             return InlineHookError.IpRelativeInstructionOutOfRange;
         }
 
@@ -259,17 +261,21 @@ pub const InlineHook = struct {
             const length: isize = @intCast(ix.length);
 
             if (is_relative(&ix) and ix.raw.disp.size == 32) {
-                const target_int = ip_int + length + @as(isize, @bitCast(ix.raw.disp.value));
+                const disp_val = truncate_to_i32(ix.raw.disp.value);
+                const target_int = ip_int + length + @as(isize, disp_val);
                 try desired.append(self.gpa, @ptrFromInt(@as(usize, @bitCast(target_int))));
             } else if (ix.raw.imm[0].size == 32) {
-                const target_int = ip_int + length + @as(isize, @bitCast(ix.raw.imm[0].value.s));
+                const imm_val = truncate_to_i32(ix.raw.imm[0].value.s);
+                const target_int = ip_int + length + @as(isize, imm_val);
                 try desired.append(self.gpa, @ptrFromInt(@as(usize, @bitCast(target_int))));
             } else if (ix.meta.category == zydis.ZYDIS_CATEGORY_COND_BR and ix.meta.branch_type == zydis.ZYDIS_BRANCH_TYPE_SHORT) {
-                const target_int = ip_int + length + @as(isize, @bitCast(ix.raw.imm[0].value.s));
+                const imm_val = truncate_to_i8(ix.raw.imm[0].value.s);
+                const target_int = ip_int + length + @as(isize, imm_val);
                 try desired.append(self.gpa, @ptrFromInt(@as(usize, @bitCast(target_int))));
                 self.m_trampoline_size += 4; // near conditional branches are 4 bytes larger
             } else if (ix.meta.category == zydis.ZYDIS_CATEGORY_UNCOND_BR and ix.meta.branch_type == zydis.ZYDIS_BRANCH_TYPE_SHORT) {
-                const target_int = ip_int + length + @as(isize, @bitCast(ix.raw.imm[0].value.s));
+                const imm_val = truncate_to_i8(ix.raw.imm[0].value.s);
+                const target_int = ip_int + length + @as(isize, imm_val);
                 try desired.append(self.gpa, @ptrFromInt(@as(usize, @bitCast(target_int))));
                 self.m_trampoline_size += 3; // near unconditional branches are 3 bytes larger
             } else {
@@ -277,7 +283,15 @@ pub const InlineHook = struct {
             }
         }
 
-        self.m_trampoline = try self.vm_allocator.alloc_near(desired.items, self.m_trampoline_size, 0x7FFF0000);
+        self.m_trampoline = self.vm_allocator.alloc_near(desired.items, self.m_trampoline_size, 0x7FFF_FFFF) catch |err| {
+            const desired0: usize = if (desired.items.len > 0) @intFromPtr(desired.items[0]) else 0;
+            const desired1: usize = if (desired.items.len > 1) @intFromPtr(desired.items[1]) else 0;
+            log.err(
+                "e9 alloc_near failed: target=0x{x}, dest=0x{x}, tramp_size={}, desired_count={}, desired0=0x{x}, desired1=0x{x}, err={s}",
+                .{ @intFromPtr(self.m_target), @intFromPtr(self.m_destination), self.m_trampoline_size, desired.items.len, desired0, desired1, @errorName(err) },
+            );
+            return err;
+        };
         errdefer {
             self.vm_allocator.free(&self.m_trampoline);
             self.m_trampoline = .{ .ptr = null, .size = 0, .allocator = self.vm_allocator };
@@ -296,35 +310,43 @@ pub const InlineHook = struct {
 
             if (is_relative(&ix) and ix.raw.disp.size == 32) {
                 @memcpy(tramp_ip[0..ix.length], ip[0..ix.length]);
-                const disp_val = @as(i32, @truncate(ix.raw.disp.value));
+                const disp_val = truncate_to_i32(ix.raw.disp.value);
                 const target_int = ip_int + length + disp_val;
                 const new_disp = target_int - (tramp_int + length);
                 if (std.math.cast(i32, new_disp)) |new_disp_i32| {
                     store_i32(@ptrFromInt(@as(usize, @bitCast(tramp_int + ix.raw.disp.offset))), new_disp_i32);
                     tramp_int += length;
                 } else {
+                    log.err(
+                        "disp32 out of range: ip=0x{x}, tramp=0x{x}, target=0x{x}, new_disp={d}, opcode=0x{x}",
+                        .{ @intFromPtr(ip), @as(usize, @bitCast(tramp_int)), @as(usize, @bitCast(target_int)), new_disp, ix.opcode },
+                    );
                     return InlineHookError.IpRelativeInstructionOutOfRange;
                 }
             } else if (is_relative(&ix) and ix.raw.imm[0].size == 32) {
                 @memcpy(tramp_ip[0..ix.length], ip[0..ix.length]);
-                const imm_val = @as(i32, @truncate(ix.raw.imm[0].value.s));
+                const imm_val = truncate_to_i32(ix.raw.imm[0].value.s);
                 const target_int = ip_int + length + imm_val;
                 const new_disp = target_int - (tramp_int + length);
                 if (std.math.cast(i32, new_disp)) |new_disp_i32| {
                     store_i32(@ptrFromInt(@as(usize, @bitCast(tramp_int + ix.raw.imm[0].offset))), @bitCast(new_disp_i32));
                     tramp_int += length;
                 } else {
+                    log.err(
+                        "imm32 out of range: ip=0x{x}, tramp=0x{x}, target=0x{x}, new_disp={d}, opcode=0x{x}",
+                        .{ @intFromPtr(ip), @as(usize, @bitCast(tramp_int)), @as(usize, @bitCast(target_int)), new_disp, ix.opcode },
+                    );
                     return InlineHookError.IpRelativeInstructionOutOfRange;
                 }
             } else if (ix.meta.category == zydis.ZYDIS_CATEGORY_COND_BR and ix.meta.branch_type == zydis.ZYDIS_BRANCH_TYPE_SHORT) {
-                const imm_val = @as(i32, @truncate(ix.raw.imm[0].value.s));
-                const target_int = ip_int + length + imm_val;
+                const imm_val = truncate_to_i8(ix.raw.imm[0].value.s);
+                const target_int = ip_int + length + @as(isize, imm_val);
                 var new_disp = target_int - (tramp_int + 6);
 
                 const start_int = @intFromPtr(self.m_target);
                 const end_int2 = start_int + self.m_original_bytes.items.len;
                 if (target_int >= @as(isize, @bitCast(start_int)) and target_int < @as(isize, @bitCast(end_int2))) {
-                    new_disp = imm_val;
+                    new_disp = @as(isize, imm_val);
                 }
 
                 tramp_ip[0] = 0x0F;
@@ -332,24 +354,32 @@ pub const InlineHook = struct {
                 if (std.math.cast(i32, new_disp)) |new_disp_i32| {
                     store_i32(@ptrFromInt(@as(usize, @bitCast(tramp_int + 2))), new_disp_i32);
                 } else {
+                    log.err(
+                        "cond-branch out of range: ip=0x{x}, tramp=0x{x}, target=0x{x}, new_disp={d}, opcode=0x{x}",
+                        .{ @intFromPtr(ip), @as(usize, @bitCast(tramp_int)), @as(usize, @bitCast(target_int)), new_disp, ix.opcode },
+                    );
                     return InlineHookError.IpRelativeInstructionOutOfRange;
                 }
                 tramp_int += 6;
             } else if (ix.meta.category == zydis.ZYDIS_CATEGORY_UNCOND_BR and ix.meta.branch_type == zydis.ZYDIS_BRANCH_TYPE_SHORT) {
-                const imm_val = @as(i32, @truncate(ix.raw.imm[0].value.s));
-                const target_int = ip_int + length + imm_val;
+                const imm_val = truncate_to_i8(ix.raw.imm[0].value.s);
+                const target_int = ip_int + length + @as(isize, imm_val);
                 var new_disp = target_int - (tramp_int + 5);
 
                 const start_int = @intFromPtr(self.m_target);
                 const end_int2 = start_int + self.m_original_bytes.items.len;
                 if (target_int >= @as(isize, @bitCast(start_int)) and target_int < @as(isize, @bitCast(end_int2))) {
-                    new_disp = imm_val;
+                    new_disp = @as(isize, imm_val);
                 }
 
                 tramp_ip[0] = 0xE9;
                 if (std.math.cast(i32, new_disp)) |new_disp_i32| {
                     store_i32(@ptrFromInt(@as(usize, @bitCast(tramp_int + 1))), new_disp_i32);
                 } else {
+                    log.err(
+                        "uncond-branch out of range: ip=0x{x}, tramp=0x{x}, target=0x{x}, new_disp={d}, opcode=0x{x}",
+                        .{ @intFromPtr(ip), @as(usize, @bitCast(tramp_int)), @as(usize, @bitCast(target_int)), new_disp, ix.opcode },
+                    );
                     return InlineHookError.IpRelativeInstructionOutOfRange;
                 }
                 tramp_int += 5;
@@ -393,6 +423,7 @@ pub const InlineHook = struct {
             try decode(&ix, ip);
 
             if ((ix.attributes & zydis.ZYDIS_ATTRIB_IS_RELATIVE) != 0) {
+                log.err("ff_hook rejected relative instruction: ip=0x{x}, opcode=0x{x}, length={}", .{ @intFromPtr(ip), ix.opcode, ix.length });
                 return InlineHookError.IpRelativeInstructionOutOfRange;
             }
 
@@ -400,7 +431,13 @@ pub const InlineHook = struct {
             self.m_trampoline_size += ix.length;
         }
 
-        self.m_trampoline = try self.vm_allocator.alloc(self.m_trampoline_size);
+        self.m_trampoline = self.vm_allocator.alloc(self.m_trampoline_size) catch |err| {
+            log.err(
+                "ff alloc failed: target=0x{x}, tramp_size={}, err={s}",
+                .{ @intFromPtr(self.m_target), self.m_trampoline_size, @errorName(err) },
+            );
+            return err;
+        };
 
         @memcpy(self.m_trampoline.address()[0..self.m_original_bytes.items.len], self.m_original_bytes.items);
 
@@ -452,6 +489,22 @@ noinline fn store_value(dest: MemPtr, value: anytype) void {
 
 fn store_i32(dest: MemPtr, value: i32) void {
     std.mem.writeInt(i32, dest[0..@sizeOf(i32)], value, .little);
+}
+
+fn truncate_to_i32(value: anytype) i32 {
+    const ValueType = @TypeOf(value);
+    const UnsignedValueType = std.meta.Int(.unsigned, @bitSizeOf(ValueType));
+    const bits: UnsignedValueType = @bitCast(value);
+    const low: u32 = @truncate(bits);
+    return @bitCast(low);
+}
+
+fn truncate_to_i8(value: anytype) i8 {
+    const ValueType = @TypeOf(value);
+    const UnsignedValueType = std.meta.Int(.unsigned, @bitSizeOf(ValueType));
+    const bits: UnsignedValueType = @bitCast(value);
+    const low: u8 = @truncate(bits);
+    return @bitCast(low);
 }
 
 fn emit_jmp_e9(src: MemPtr, dst: MemPtr, size: usize) InlineHookError!void {

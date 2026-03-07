@@ -7,6 +7,29 @@ const std = @import("std");
 const builtin = @import("builtin");
 const win = std.os.windows;
 const utility = @import("utility.zig");
+const log = std.log.scoped(.os_windows);
+
+extern "kernel32" fn VirtualProtect(
+    lpAddress: ?win.LPVOID,
+    dwSize: win.SIZE_T,
+    flNewProtect: win.DWORD,
+    lpflOldProtect: *win.DWORD,
+) callconv(.c) win.BOOL;
+
+extern "kernel32" fn VirtualQuery(
+    lpAddress: ?win.LPCVOID,
+    lpBuffer: *win.MEMORY_BASIC_INFORMATION,
+    dwLength: win.SIZE_T,
+) callconv(.c) win.SIZE_T;
+
+extern "kernel32" fn VirtualAlloc(
+    lpAddress: ?win.LPVOID,
+    dwSize: win.SIZE_T,
+    flAllocationType: win.DWORD,
+    flProtect: win.DWORD,
+) callconv(.c) ?win.LPVOID;
+
+extern "kernel32" fn GetLastError() callconv(.c) win.DWORD;
 
 fn convert_access_to_protect(access: VmAccess) !win.DWORD {
     if (access.is_same(VmAccess.R)) {
@@ -35,12 +58,17 @@ fn convert_protect_to_access(protect: win.DWORD) !VmAccess {
 pub fn vm_allocate(addr: ?MemPtr, size: usize, access: VmAccess) !MemPtr {
     const protect = try convert_access_to_protect(access);
 
-    const ret = try win.VirtualAlloc(
+    const ret = VirtualAlloc(
         @ptrCast(addr),
         size,
         win.MEM_RESERVE | win.MEM_COMMIT,
         protect,
-    );
+    ) orelse {
+        const err = GetLastError();
+        const addr_int: usize = if (addr) |p| @intFromPtr(p) else 0;
+        log.err("VirtualAlloc failed: addr=0x{x}, size={}, protect=0x{x}, gle={d}", .{ addr_int, size, protect, err });
+        return error.FailedToAllocate;
+    };
 
     return @ptrCast(ret);
 }
@@ -74,7 +102,11 @@ pub fn vm_protect(ptr: MemPtr, size: usize, access: VmAccess) !VmAccess {
     const protect = try convert_access_to_protect(access);
 
     var old_protect: win.DWORD = 0;
-    try win.VirtualProtect(@ptrCast(ptr), size, protect, &old_protect);
+    if (VirtualProtect(@ptrCast(ptr), size, protect, &old_protect) == 0) {
+        const err = GetLastError();
+        log.err("VirtualProtect failed: addr=0x{x}, size={}, new=0x{x}, gle={d}", .{ @intFromPtr(ptr), size, protect, err });
+        return error.FailedToProtect;
+    }
 
     return try convert_protect_to_access(old_protect);
 }
@@ -231,14 +263,26 @@ pub fn trap_threads(from: MemPtr, to: MemPtr, size: usize, run_func: *const fn (
     var from_mbi = std.mem.zeroes(win.MEMORY_BASIC_INFORMATION);
     var to_mbi = std.mem.zeroes(win.MEMORY_BASIC_INFORMATION);
 
-    _ = try win.VirtualQuery(@ptrCast(@constCast(&find_me)), &find_me_mbi, @sizeOf(win.MEMORY_BASIC_INFORMATION));
-    _ = try win.VirtualQuery(@ptrCast(from), &from_mbi, @sizeOf(win.MEMORY_BASIC_INFORMATION));
-    _ = try win.VirtualQuery(@ptrCast(to), &to_mbi, @sizeOf(win.MEMORY_BASIC_INFORMATION));
+    const find_me_query_ok = VirtualQuery(
+        @ptrCast(@constCast(&find_me)),
+        &find_me_mbi,
+        @sizeOf(win.MEMORY_BASIC_INFORMATION),
+    ) != 0;
+    const from_query_ok = VirtualQuery(
+        @ptrCast(from),
+        &from_mbi,
+        @sizeOf(win.MEMORY_BASIC_INFORMATION),
+    ) != 0;
+    const to_query_ok = VirtualQuery(
+        @ptrCast(to),
+        &to_mbi,
+        @sizeOf(win.MEMORY_BASIC_INFORMATION),
+    ) != 0;
 
     var new_protect: win.DWORD = win.PAGE_READWRITE;
 
-    if (from_mbi.AllocationBase == find_me_mbi.AllocationBase or
-        to_mbi.AllocationBase == find_me_mbi.AllocationBase)
+    if (find_me_query_ok and ((from_query_ok and from_mbi.AllocationBase == find_me_mbi.AllocationBase) or
+        (to_query_ok and to_mbi.AllocationBase == find_me_mbi.AllocationBase)))
     {
         new_protect = win.PAGE_EXECUTE_READWRITE;
     }
@@ -264,16 +308,31 @@ pub fn trap_threads(from: MemPtr, to: MemPtr, size: usize, run_func: *const fn (
     // std.debug.print("unlocking at trap_threads\n", .{});
     // trap_manager.mutex.unlock();
 
+    virtual_protect_mutex.lock();
+    defer virtual_protect_mutex.unlock();
+
     var from_protect: win.DWORD = 0;
     var to_protect: win.DWORD = 0;
 
-    _ = try win.VirtualProtect(from, size, new_protect, &from_protect);
-    _ = try win.VirtualProtect(to, size, new_protect, &to_protect);
+    const from_protected = VirtualProtect(@ptrCast(from), size, new_protect, &from_protect) != 0;
+    if (!from_protected) {
+        log.err("trap_threads protect(from) failed: from=0x{x}, size={}, protect=0x{x}, gle={d}", .{ @intFromPtr(from), size, new_protect, GetLastError() });
+    }
+
+    const to_protected = VirtualProtect(@ptrCast(to), size, new_protect, &to_protect) != 0;
+    if (!to_protected) {
+        log.err("trap_threads protect(to) failed: to=0x{x}, size={}, protect=0x{x}, gle={d}", .{ @intFromPtr(to), size, new_protect, GetLastError() });
+    }
 
     run_func();
 
-    _ = try win.VirtualProtect(from, size, from_protect, &from_protect);
-    _ = try win.VirtualProtect(to, size, to_protect, &to_protect);
+    if (to_protected) {
+        _ = VirtualProtect(@ptrCast(to), size, to_protect, &to_protect);
+    }
+
+    if (from_protected) {
+        _ = VirtualProtect(@ptrCast(from), size, from_protect, &from_protect);
+    }
 }
 
 fn fix_ip(thread_ctx: *win.CONTEXT, old_ip: MemPtr, new_ip: MemPtr) void {
