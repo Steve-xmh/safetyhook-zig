@@ -33,17 +33,13 @@ const Project = struct {
     zydis: *std.Build.Step.Compile,
     safetyhook: *std.Build.Module,
 
-    fn create(b: *std.Build) Project {
-        const target = b.resolveTargetQuery(.{
-            .cpu_arch = .x86_64,
-            .os_tag = .windows,
-            .abi = .msvc,
-        });
-        const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
-
+    fn create(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) Project {
         // Build zydis
 
-        const zydis = b.dependency("zydis", .{});
+        const zydis = b.dependency("zydis", .{
+            .target = target,
+            .optimize = optimize,
+        });
 
         const zydis_lib_c = b.addTranslateC(.{
             .root_source_file = zydis.path("Zydis.h"),
@@ -100,7 +96,16 @@ const Project = struct {
 };
 
 pub fn build(b: *std.Build) !void {
-    const proj = Project.create(b);
+    const target = b.standardTargetOptions(.{
+        .default_target = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .windows,
+            .abi = .msvc,
+        },
+    });
+    const optimize = b.standardOptimizeOption(.{});
+
+    const proj = Project.create(b, target, optimize);
 
     proj.add_example("inline-hook");
     proj.add_example("mid-hook");
